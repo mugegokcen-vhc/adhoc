@@ -12,6 +12,17 @@ from openpyxl.utils import get_column_letter
 PAGEVIEW_HEADERS = ["Month", "url", "total_pageview"]
 SCROLL_HEADERS = ["Month", "url", "scroll depth", "number of visitors"]
 
+QUALITY_HEADERS = [
+    "check type",
+    "status",
+    "message",
+    "source file",
+    "Month",
+    "url",
+]
+
+EXPECTED_SCROLL_DEPTHS = list(range(5, 101, 5))
+
 
 def read_csv_rows(file_path: Path) -> list[list[str]]:
     """Read Clarity CSV with BOM-safe UTF-8 handling."""
@@ -249,6 +260,277 @@ def log_merged_inputs(pageview_records: list[dict]) -> None:
 
         print(f"  => merged total_pageview: {merged_pageviews}")
 
+def format_month_for_log(month_date: date | None) -> str:
+    if month_date is None:
+        return ""
+
+    return month_date.strftime("%d/%m/%Y")
+
+
+def add_quality_row(
+    quality_rows: list[list],
+    check_type: str,
+    status: str,
+    message: str,
+    source_file: str = "",
+    month_date: date | None = None,
+    url: str = "",
+):
+    quality_rows.append([
+        check_type,
+        status,
+        message,
+        source_file,
+        format_month_for_log(month_date),
+        url,
+    ])
+
+
+def validate_parsed_file(
+    csv_file: Path,
+    pageview_record: dict,
+    file_scroll_records: list[dict],
+    quality_rows: list[list],
+):
+    """
+    Validate one successfully parsed CSV file.
+    These checks do not stop the script; they write PASS/WARN/FAIL rows
+    into the Quality_Check sheet.
+    """
+    source_file = str(csv_file)
+    month_date = pageview_record.get("month_date")
+    url = pageview_record.get("url")
+    total_pageview = pageview_record.get("total_pageview")
+
+    if total_pageview is None:
+        add_quality_row(
+            quality_rows,
+            "file validation",
+            "FAIL",
+            "Page views value is missing.",
+            source_file,
+            month_date,
+            url,
+        )
+    elif total_pageview <= 0:
+        add_quality_row(
+            quality_rows,
+            "file validation",
+            "WARN",
+            f"Page views value is zero or negative: {total_pageview}",
+            source_file,
+            month_date,
+            url,
+        )
+
+    scroll_depths = [
+        record["scroll_depth"]
+        for record in file_scroll_records
+    ]
+
+    missing_depths = sorted(set(EXPECTED_SCROLL_DEPTHS) - set(scroll_depths))
+    extra_depths = sorted(set(scroll_depths) - set(EXPECTED_SCROLL_DEPTHS))
+
+    duplicate_depths = sorted({
+        depth
+        for depth in scroll_depths
+        if scroll_depths.count(depth) > 1
+    })
+
+    if missing_depths:
+        add_quality_row(
+            quality_rows,
+            "scroll depth validation",
+            "WARN",
+            f"Missing scroll depths: {missing_depths}",
+            source_file,
+            month_date,
+            url,
+        )
+
+    if extra_depths:
+        add_quality_row(
+            quality_rows,
+            "scroll depth validation",
+            "WARN",
+            f"Unexpected scroll depths: {extra_depths}",
+            source_file,
+            month_date,
+            url,
+        )
+
+    if duplicate_depths:
+        add_quality_row(
+            quality_rows,
+            "scroll depth validation",
+            "WARN",
+            f"Duplicate scroll depths in one CSV: {duplicate_depths}",
+            source_file,
+            month_date,
+            url,
+        )
+
+    if not missing_depths and not extra_depths and not duplicate_depths:
+        add_quality_row(
+            quality_rows,
+            "scroll depth validation",
+            "PASS",
+            "Scroll depths look complete and unique.",
+            source_file,
+            month_date,
+            url,
+        )
+
+    if total_pageview and total_pageview > 0:
+        visitors_above_pageviews = []
+
+        for record in file_scroll_records:
+            if record["number_of_visitors"] > total_pageview:
+                visitors_above_pageviews.append(
+                    record["scroll_depth"]
+                )
+
+        if visitors_above_pageviews:
+            add_quality_row(
+                quality_rows,
+                "visitor validation",
+                "WARN",
+                (
+                    "Number of visitors is higher than total pageviews "
+                    f"for scroll depths: {visitors_above_pageviews}"
+                ),
+                source_file,
+                month_date,
+                url,
+            )
+        else:
+            add_quality_row(
+                quality_rows,
+                "visitor validation",
+                "PASS",
+                "Number of visitors values are not higher than total pageviews.",
+                source_file,
+                month_date,
+                url,
+            )
+
+
+def log_and_validate_merged_groups(
+    pageview_records: list[dict],
+    quality_rows: list[list],
+):
+    """
+    Detect and log which month + url combinations were merged.
+    """
+    groups = {}
+
+    for record in pageview_records:
+        key = (
+            record["month_key"],
+            record["month_date"],
+            record["url"],
+        )
+
+        if key not in groups:
+            groups[key] = []
+
+        groups[key].append(record)
+
+    merged_groups = {
+        key: records
+        for key, records in groups.items()
+        if len(records) > 1
+    }
+
+    if not merged_groups:
+        print("\nMerged groups: none")
+
+        add_quality_row(
+            quality_rows,
+            "merge validation",
+            "PASS",
+            "No merged groups found.",
+        )
+
+        return
+
+    print(f"\nMerged groups found: {len(merged_groups)}")
+
+    for key, records in sorted(merged_groups.items()):
+        month_key, month_date, url = key
+
+        merged_pageviews = sum(
+            record["total_pageview"]
+            for record in records
+        )
+
+        file_names = [
+            Path(record["source_file"]).name
+            for record in records
+        ]
+
+        print("\nMERGED GROUP")
+        print(f"Month: {month_date.strftime('%d/%m/%Y')}")
+        print(f"URL: {url}")
+        print(f"Files merged: {len(records)}")
+
+        for record in records:
+            source_path = Path(record["source_file"])
+            print(
+                f"  - {source_path.name} | "
+                f"pageviews: {record['total_pageview']}"
+            )
+
+        print(f"  => merged total_pageview: {merged_pageviews}")
+
+        add_quality_row(
+            quality_rows,
+            "merge validation",
+            "WARN",
+            (
+                f"{len(records)} CSV files were merged. "
+                f"Merged total_pageview: {merged_pageviews}. "
+                f"Files: {', '.join(file_names)}"
+            ),
+            "",
+            month_date,
+            url,
+        )
+
+
+def add_summary_quality_checks(
+    quality_rows: list[list],
+    csv_count: int,
+    processed_count: int,
+    skipped_count: int,
+    pageview_rows_count: int,
+    scroll_rows_count: int,
+):
+    add_quality_row(
+        quality_rows,
+        "summary",
+        "PASS" if csv_count == processed_count + skipped_count else "FAIL",
+        (
+            f"CSV count: {csv_count}, "
+            f"processed: {processed_count}, "
+            f"skipped: {skipped_count}"
+        ),
+    )
+
+    add_quality_row(
+        quality_rows,
+        "summary",
+        "PASS",
+        f"Final Pageviews rows: {pageview_rows_count}",
+    )
+
+    add_quality_row(
+        quality_rows,
+        "summary",
+        "PASS",
+        f"Final Scroll rows: {scroll_rows_count}",
+    )
+    
 def merge_pageviews(pageview_records: list[dict]) -> list[list]:
     """
     Merge pageview records by Month + url.
@@ -262,7 +544,7 @@ def merge_pageviews(pageview_records: list[dict]) -> list[list]:
         key = (
             record["month_key"],
             record["month_date"],
-            record["url"],
+            record["url"], 
         )
 
         if key not in merged:
@@ -400,6 +682,7 @@ def style_sheet(ws, table_name: str):
 def build_excel(input_dir: Path, output_file: Path):
     pageview_records = []
     scroll_records = []
+    quality_rows = []
     errors = []
 
     csv_files = collect_csv_files(input_dir)
@@ -416,16 +699,41 @@ def build_excel(input_dir: Path, output_file: Path):
             pageview_records.append(pageview_record)
             scroll_records.extend(file_scroll_records)
 
+            validate_parsed_file(
+                csv_file,
+                pageview_record,
+                file_scroll_records,
+                quality_rows,
+            )
+
             print(f"Processed: {csv_file}")
 
         except Exception as exc:
             errors.append((str(csv_file), str(exc)))
+
+            add_quality_row(
+                quality_rows,
+                "file parsing",
+                "FAIL",
+                str(exc),
+                str(csv_file),
+            )
+
             print(f"Skipped: {csv_file} | Reason: {exc}")
 
-    
-    log_merged_inputs(pageview_records)
+    log_and_validate_merged_groups(pageview_records, quality_rows)
+
     pageview_rows = merge_pageviews(pageview_records)
     scroll_rows = merge_scroll(scroll_records)
+
+    add_summary_quality_checks(
+        quality_rows=quality_rows,
+        csv_count=len(csv_files),
+        processed_count=len(pageview_records),
+        skipped_count=len(errors),
+        pageview_rows_count=len(pageview_rows),
+        scroll_rows_count=len(scroll_rows),
+    )
 
     wb = Workbook()
 
@@ -433,6 +741,7 @@ def build_excel(input_dir: Path, output_file: Path):
     pageview_ws.title = "Pageviews"
 
     scroll_ws = wb.create_sheet("Scroll")
+    quality_ws = wb.create_sheet("Quality_Check")
 
     pageview_ws.append(PAGEVIEW_HEADERS)
     for row in pageview_rows:
@@ -442,22 +751,30 @@ def build_excel(input_dir: Path, output_file: Path):
     for row in scroll_rows:
         scroll_ws.append(row)
 
+    quality_ws.append(QUALITY_HEADERS)
+    for row in quality_rows:
+        quality_ws.append(row)
+
     style_sheet(pageview_ws, "PageviewsTable")
     style_sheet(scroll_ws, "ScrollTable")
+    style_sheet(quality_ws, "QualityCheckTable")
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_file)
 
     print("\nDone")
     print(f"Output file: {output_file}")
+    print(f"CSV files found: {len(csv_files)}")
+    print(f"CSV files processed: {len(pageview_records)}")
+    print(f"CSV files skipped: {len(errors)}")
     print(f"Pageview rows: {len(pageview_rows)}")
     print(f"Scroll rows: {len(scroll_rows)}")
+    print(f"Quality check rows: {len(quality_rows)}")
 
     if errors:
         print("\nFiles skipped:")
         for file_name, reason in errors:
             print(f"- {file_name}: {reason}")
-
 
 def main():
     project_root = Path(__file__).resolve().parents[1]
