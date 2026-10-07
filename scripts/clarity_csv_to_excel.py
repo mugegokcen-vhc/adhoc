@@ -497,7 +497,105 @@ def log_and_validate_merged_groups(
             url,
         )
 
+def validate_missing_months(
+    pageview_records: list[dict],
+    quality_rows: list[list],
+):
+    """
+    Check whether every URL has data for every month covered
+    by the complete dataset.
 
+    Example:
+    Dataset months: September, October
+
+    URL A: September + October -> complete
+    URL B: October only -> WARN for missing September
+    """
+
+    if not pageview_records:
+        add_quality_row(
+            quality_rows,
+            "missing month validation",
+            "WARN",
+            "Missing month validation could not be performed because no pageview records were found.",
+        )
+        return
+
+    # Find the complete month range in the dataset
+    all_months = {
+        record["month_date"]
+        for record in pageview_records
+    }
+
+    first_month = min(all_months)
+    last_month = max(all_months)
+
+    # Build continuous list of expected months
+    expected_months = []
+
+    current_month = first_month
+
+    while current_month <= last_month:
+        expected_months.append(current_month)
+
+        if current_month.month == 12:
+            current_month = date(current_month.year + 1, 1, 1)
+        else:
+            current_month = date(
+                current_month.year,
+                current_month.month + 1,
+                1,
+            )
+
+    # Collect available months for each URL
+    months_by_url = {}
+
+    for record in pageview_records:
+        url = record["url"]
+        month_date = record["month_date"]
+
+        if url not in months_by_url:
+            months_by_url[url] = set()
+
+        months_by_url[url].add(month_date)
+
+    missing_month_found = False
+
+    # Compare each URL against expected months
+    for url, available_months in sorted(months_by_url.items()):
+
+        missing_months = [
+            month
+            for month in expected_months
+            if month not in available_months
+        ]
+
+        for missing_month in missing_months:
+            missing_month_found = True
+
+            add_quality_row(
+                quality_rows,
+                "missing month validation",
+                "WARN",
+                "No data found for this URL in this month.",
+                "",
+                missing_month,
+                url,
+            )
+
+    if not missing_month_found:
+        add_quality_row(
+            quality_rows,
+            "missing month validation",
+            "PASS",
+            (
+                "All URLs contain data for every month between "
+                f"{first_month.strftime('%m/%Y')} and "
+                f"{last_month.strftime('%m/%Y')}."
+            ),
+        )
+
+        
 def add_summary_quality_checks(
     quality_rows: list[list],
     csv_count: int,
