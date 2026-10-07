@@ -595,7 +595,7 @@ def validate_missing_months(
             ),
         )
 
-        
+
 def add_summary_quality_checks(
     quality_rows: list[list],
     csv_count: int,
@@ -820,6 +820,11 @@ def build_excel(input_dir: Path, output_file: Path):
             print(f"Skipped: {csv_file} | Reason: {exc}")
 
     log_and_validate_merged_groups(pageview_records, quality_rows)
+
+    validate_missing_months(
+        pageview_records,
+        quality_rows,
+        )
 
     pageview_rows = merge_pageviews(pageview_records)
     scroll_rows = merge_scroll(scroll_records)
